@@ -1,23 +1,20 @@
 import math
-
 import cv2
-
 from models.detector import Detector
-
 
 def calibrate_focal_length():
     # --- 1. 手动设置已知物理参数 ---
-    # 确保你标定时，卷尺量的距离和这里一致
     REAL_DIST = 90.0  # 距离 (cm)
     REAL_HEIGHT = 17.5  # 靶纸黑框的真实物理高度 (cm)
 
+    # 这里是 4，如果你的香橙派/电脑读不到画面，记得改成 0 或其他数字
     cap = cv2.VideoCapture(4)
+
     # 强制设置分辨率，必须与未来比赛运行的分辨率严格一致
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     # --- 2. 初始化检测器 ---
-    # 根据你提供的 Detector 定义：只接受 min_area 和 max_area
     detector = Detector(min_area=5000, max_area=500000)
 
     print("--- 标定程序已启动 ---")
@@ -30,14 +27,20 @@ def calibrate_focal_length():
             print("无法读取摄像头帧")
             break
 
-        # 1. 运行你的检测逻辑
-        # 你的函数返回：渲染后的图 和 board 对象
-        annotated_frame, board = detector.process_image(frame)
+        # 1. 运行检测逻辑 (修改为正确的 detect 接口)
+        board = detector.detect(frame)
+
+        # 2. 准备绘制画面
+        annotated_frame = frame.copy()
+        if board is not None:
+            # 临时将 board 放进列表以复用 detector 的 draw 方法
+            detector.boards = [board]
+            annotated_frame = detector.draw(annotated_frame)
 
         height_px = 0
+
+        # 3. 计算像素高度
         if board is not None and len(board.points) == 4:
-            # --- 3. 计算像素高度 ---
-            # 你的 points 顺序为: [左上, 左下, 右下, 右上]
             # 计算左侧边和右侧边的平均长度作为像素高度
             pts = board.points
             h_left = math.sqrt(
@@ -48,8 +51,7 @@ def calibrate_focal_length():
             )
             height_px = (h_left + h_right) / 2.0
 
-            # 2. 实时计算理论焦距 (用于预览)
-            # 公式: f = (D * H_px) / H_real
+            # 4. 实时计算理论焦距 (用于预览)
             current_f = (REAL_DIST * height_px) / REAL_HEIGHT
 
             # 在画面上显示结果
@@ -72,10 +74,10 @@ def calibrate_focal_length():
                 2,
             )
 
-        # 显示检测画面和二值化画面（方便调阈值）
+        # 显示检测画面和二值化画面（修改为正确的 self.binary 属性）
         cv2.imshow("Calibration (Annotated)", annotated_frame)
-        if detector.last_binary is not None:
-            cv2.imshow("Binary Mask (Check this)", detector.last_binary)
+        if detector.binary is not None:
+            cv2.imshow("Binary Mask (Check this)", detector.binary)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("s") and height_px > 0:
@@ -91,7 +93,6 @@ def calibrate_focal_length():
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     calibrate_focal_length()
