@@ -69,33 +69,41 @@ class Detector:
                 approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
 
                 if len(approx) == 4:
-                    points = approx.reshape(4, 2)
+                    # 1. 立即转为纯 Python 列表，抛弃 Numpy 包袱
+                    pts = approx.reshape(4, 2).tolist()
 
-                    sum_xy = points.sum(axis=1)
-                    diff_xy = points[:, 0] - points[:, 1]
-                    sorted_points = [
-                        points[np.argmin(sum_xy)],  # 左上
-                        points[np.argmax(diff_xy)],  # 左下
-                        points[np.argmax(sum_xy)],  # 右下
-                        points[np.argmin(diff_xy)],  # 右上
-                    ]
+                    # 2. [优化] 使用纯 Python 内置高阶函数进行点排序
+                    # 根据 x+y 和 x-y 的特征快速定位四个角
+                    tl = min(pts, key=lambda p: p[0] + p[1])  # 左上
+                    br = max(pts, key=lambda p: p[0] + p[1])  # 右下
+                    bl = max(pts, key=lambda p: p[0] - p[1])  # 左下
+                    tr = min(pts, key=lambda p: p[0] - p[1])  # 右上
 
+                    sorted_points = [tl, bl, br, tr]
+
+                    # 3. 容错校验（保留了你原版的安全机制，防止畸变导致点重合）
+                    # 这里也将原版的 Numpy 写法替换为了纯 Python 的 sorted
                     if len(set(tuple(pt) for pt in sorted_points)) < 4:
+                        pts_x = sorted(pts, key=lambda p: p[0])
+                        pts_y = sorted(pts, key=lambda p: p[1])
                         sorted_points = [
-                            points[np.argmin(points[:, 0])],
-                            points[np.argmin(points[:, 1])],
-                            points[np.argmax(points[:, 0])],
-                            points[np.argmax(points[:, 1])],
+                            pts_x[0],  # 最左
+                            pts_y[0],  # 最上
+                            pts_x[-1],  # 最右
+                            pts_y[-1],  # 最下
                         ]
 
+                    # 4. 构建 Board 对象
                     board = Board()
-                    board.points = [tuple(map(int, pt)) for pt in sorted_points]
+                    # 强制转换为 int 元组，确保完全符合后续 cv2 绘图和求交点的格式要求
+                    board.points = [(int(pt[0]), int(pt[1])) for pt in sorted_points]
                     board.area = area
                     board.center = self._calculate_intersection(board.points)
 
                     if board.center is not None:
                         boards.append(board)
 
+        # 按面积从大到小排序，取最大的目标
         if boards:
             boards.sort(key=lambda b: b.area, reverse=True)
             self.boards = boards

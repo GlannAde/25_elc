@@ -3,8 +3,8 @@ import time
 import cv2
 
 # 只保留视觉相关的模块
-from model.cam import Camera
-from model.detector import Detector
+from models.cam import Camera
+from models.detector import Detector
 
 
 def main():

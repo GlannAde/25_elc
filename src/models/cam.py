@@ -1,10 +1,12 @@
-import cv2
+import queue
 import threading
 import time
-import queue
+
+import cv2
+
 
 class Camera:
-    def __init__(self, index=4, width=640, height=480, format='MJPG', fps=120):
+    def __init__(self, index=4, width=640, height=480, format="MJPG", fps=120):
         """
         基于长度为1的队列优化的相机类
         """
@@ -32,7 +34,9 @@ class Camera:
         self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
 
-        print(f"Camera Initialized: Index={self.index}, Size={self.width}x{self.height}, Target FPS={fps}, Actual FPS={self.actual_fps}")
+        print(
+            f"Camera Initialized: Index={self.index}, Size={self.width}x{self.height}, Target FPS={fps}, Actual FPS={self.actual_fps}"
+        )
 
     def _update(self):
         """生产者线程：疯狂采图，只留最新"""
@@ -77,6 +81,7 @@ class Camera:
         self.cam.release()
         print("Camera source released.")
 
+
 if __name__ == "__main__":
     try:
         my_cam = Camera(index=0, width=640, height=480, fps=120)
@@ -84,7 +89,7 @@ if __name__ == "__main__":
             r, f = my_cam.read()
             if r:
                 cv2.imshow("Queue Cam Test", f)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
         my_cam.release()
