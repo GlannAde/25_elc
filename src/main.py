@@ -18,6 +18,12 @@ PITCH_PORT = "/dev/ttyACM1"  # Pitch轴电机串口 (根据实际情况修改)
 
 USE_KF = True  # 是否启用卡尔曼滤波预测
 SHOW_WINDOWS = True  # 是否显示调试画面和参数控制台
+
+# 齿轮传动比配置 (电机转动角度 / 云台实际转动角度)
+# Pitch轴: 13:120 -> 电机转120度云台转13度 -> 传动比 = 120/13 ≈ 9.23
+# Yaw轴: 11:56 -> 电机转56度云台转11度 -> 传动比 = 56/11 ≈ 5.09
+GEAR_RATIO_YAW = 5.09     # Yaw轴传动比 (11:56)
+GEAR_RATIO_PITCH = 9.23   # Pitch轴传动比 (13:120)
 # ========================================================
 
 # ==================== 模块初始化 ====================
@@ -146,17 +152,18 @@ def main():
                 correction_pitch = pid_pitch.compute(pitch_err)
 
                 try:
-                    # 关键动作：abs_mode=False 代表“相对运动”。
+                    # 关键动作：abs_mode=False 代表"相对运动"。
                     # 即让电机在当前位置的基础上，再转动 correction 的度数去追赶目标。
+                    # 应用齿轮传动比补偿：电机需要多转 GEAR_RATIO 倍才能达到期望的云台角度
                     stepper_yaw.emm_v5_move_to_angle(
-                        angle_deg=-correction_yaw,
+                        angle_deg=-correction_yaw * GEAR_RATIO_YAW,
                         vel_rpm=vel_rpm,
                         acc=acc,
                         abs_mode=False,
                     )
 
                     stepper_pitch.emm_v5_move_to_angle(
-                        angle_deg=-correction_pitch,
+                        angle_deg=-correction_pitch * GEAR_RATIO_PITCH,
                         vel_rpm=vel_rpm,
                         acc=acc,
                         abs_mode=False,
