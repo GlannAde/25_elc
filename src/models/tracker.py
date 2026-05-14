@@ -128,17 +128,44 @@ class Tracker:
 
         return yaw, pitch, dist
 
-    def track(self, board):
+    def track(self, board, mode="TRACK", radius_px=80, period_sec=3.0):
+        """
+        mode: "TRACK" (正常追踪), "CIRCLE" (画圆模式)
+        radius_px: 画圆半径(像素)
+        period_sec: 画一圈所需时间(秒)
+        """
         filtered_cx, filtered_cy, filtered_dist = self.filter_and_predict(board)
 
         if self.status != Status.LOST:
-            yaw_err, pitch_err, dist = self.solve(
-                filtered_cx, filtered_cy, filtered_dist
-            )
+            # ================= 绝招 1：提取速度，增加动态提前量 =================
+            if self.use_kf:
+                # 从 6 维状态矩阵中直接提取 X 轴和 Y 轴的运动速度 (像素/秒)
+                vx = self.kf.kf.statePost[3, 0]
+                vy = self.kf.kf.statePost[4, 0]
+            else:
+                vx, vy = 0.0, 0.0
+
+            # 提前量时间补偿 (根据你的电机响应和视觉延迟微调，通常 0.05 ~ 0.1 秒)
+            sys_delay = 0.05
+
+            # 计算预测目标点
+            aim_cx = filtered_cx + vx * sys_delay
+            aim_cy = filtered_cy + vy * sys_delay
+
+            # ================= 绝招 2：叠加视觉闭环画圆轨迹 =================
+            if mode == "CIRCLE":
+                t = time.time()
+                # 计算角速度 omega
+                omega = 2 * math.pi / period_sec
+                # 叠加圆周运动的参数方程
+                aim_cx += radius_px * math.cos(omega * t)
+                aim_cy += radius_px * math.sin(omega * t)
+
+            # ================= 逆运动学解算 =================
+            # 把算出来的虚拟瞄准点扔给解算器
+            yaw_err, pitch_err, dist = self.solve(aim_cx, aim_cy, filtered_dist)
 
             # --- 动态开火决策 ---
-            # 只有当视觉完全捕获目标 (TRACK) 且角度误差都在允许死区内时，才进行击发。
-            # 如果是 TMP_LOST (预测状态)，为了安全起见，停止击发。
             if (
                 self.status == Status.TRACK
                 and abs(yaw_err) < self.fire_deadzone
@@ -148,11 +175,14 @@ class Tracker:
             else:
                 self.onfire = False
 
-            # --- [核心新增] 提取 3D 滤波后的 XY 坐标，用于画面丝滑显示 ---
+            # 原理的平滑中心点（用于画绿色十字）
             smooth_center = (int(filtered_cx), int(filtered_cy))
+            # 新增的虚拟瞄准点（用于画蓝色十字，直观看到系统的"提前量"和"画圆轨迹"）
+            aim_point = (int(aim_cx), int(aim_cy))
 
-            return yaw_err, pitch_err, dist, self.status, self.laser_pos, smooth_center
+            # 注意返回值多加了一个 aim_point
+            return yaw_err, pitch_err, dist, self.status, self.laser_pos, smooth_center, aim_point
         else:
             self.laser_pos = None
-            self.onfire = False  # 完全丢失目标时，强制断开激光
-            return 0.0, 0.0, 0.0, self.status, None, None
+            self.onfire = False
+            return 0.0, 0.0, 0.0, self.status, None, None, None

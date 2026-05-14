@@ -1,4 +1,5 @@
 import time
+
 import cv2
 
 # --- 导入视觉与控制模块 ---
@@ -22,8 +23,8 @@ SHOW_WINDOWS = True  # 是否显示调试画面和参数控制台
 # 齿轮传动比配置 (电机转动角度 / 云台实际转动角度)
 # Pitch轴: 13:120 -> 电机转120度云台转13度 -> 传动比 = 120/13 ≈ 9.23
 # Yaw轴: 11:56 -> 电机转56度云台转11度 -> 传动比 = 56/11 ≈ 5.09
-GEAR_RATIO_YAW = 5.09     # Yaw轴传动比 (11:56)
-GEAR_RATIO_PITCH = 9.23   # Pitch轴传动比 (13:120)
+GEAR_RATIO_YAW = 5.09  # Yaw轴传动比 (11:56)
+GEAR_RATIO_PITCH = 9.23  # Pitch轴传动比 (13:120)
 # ========================================================
 
 # ==================== 模块初始化 ====================
@@ -43,6 +44,7 @@ pid_pitch = PIDController(Kp=0.0, Ki=0.0, Kd=0.0, dt=1 / 30)
 lazer = GPIN(pin=16, mode=1)  # 激光笔控制
 heart_beat = GPIN(pin=18, mode=1)  # 系统心跳灯
 # ========================================================
+
 
 def nothing(x):
     pass
@@ -108,6 +110,8 @@ def main():
     if SHOW_WINDOWS:
         init_board()
 
+    # 新增系统工作模式
+    current_mode = "TRACK"  # 默认正常追踪
     prev_time = time.time()
 
     try:
@@ -130,8 +134,10 @@ def main():
 
             # 4. 视觉识别与滤波解算
             target = detector.detect(frame)
-            yaw_err, pitch_err, dist, status, laser_pos, smooth_center = tracker.track(
-                target
+
+            # 传入 current_mode。返回值多加了一个 aim_point
+            yaw_err, pitch_err, dist, status, laser_pos, smooth_center, aim_point = (
+                tracker.track(target, mode=current_mode, radius_px=100, period_sec=3.0)
             )
 
             # 5. FPS 计算
@@ -194,16 +200,22 @@ def main():
             if SHOW_WINDOWS:
                 vis_trk = frame.copy()
 
-                # 如果正在追踪，画出经过 3D 卡尔曼平滑后的丝滑准星
+                # 如果正在追踪，画出经过 3D 卡尔曼平滑后的靶纸中心
                 if status != Status.LOST and smooth_center:
+                    # 绿色十字代表：视觉识别出的靶纸真实中心
                     cv2.drawMarker(
-                        vis_trk,
-                        smooth_center,
-                        (0, 255, 0),  # 绿色丝滑准星
-                        cv2.MARKER_CROSS,
-                        20,
-                        2,
+                        vis_trk, smooth_center, (0, 255, 0), cv2.MARKER_CROSS, 20, 2
                     )
+
+                # ========= 新增：画出系统的真实意图 (虚拟瞄准点) =========
+                if status != Status.LOST and aim_point:
+                    # 蓝色十字代表：系统加上了"提前量"或"画圆轨迹"后的真正瞄准点
+                    cv2.drawMarker(
+                        vis_trk, aim_point, (255, 0, 0), cv2.MARKER_CROSS, 15, 2
+                    )
+
+                    # 用一条细线连接真实中心和瞄准点，直观显示预测偏移
+                    cv2.line(vis_trk, smooth_center, aim_point, (255, 255, 0), 1)
 
                 # 如果解算出了激光落点，画个红点
                 if laser_pos:
@@ -221,9 +233,14 @@ def main():
                 )
                 cv2.imshow("Tracker", vis_trk)
 
-            # 10. 退出指令
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            # 10. 退出与模式切换指令
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            elif key == ord("c"):
+                # 按 'c' 键在 "追踪" 和 "画圆" 模式之间来回切换
+                current_mode = "CIRCLE" if current_mode == "TRACK" else "TRACK"
+                print(f"\n >>> 已切换至模式: {current_mode} <<< \n")
 
     except Exception as e:
         print(f"\n 主循环发生异常: {str(e)}")
