@@ -12,12 +12,12 @@ def main():
 
     # --- 1. 初始化相机 ---
     # 记得核对 index，如果是外部 USB 摄像头通常是 0, 1, 4 等
-    cam = Camera(index=0, width=640, height=480, format="MJPG", fps=120)
+    cam = Camera(index=1, width=640, height=480, format="MJPG", fps=120)
     center_x, center_y = cam.width / 2, cam.height / 2
 
     # --- 2. 初始化视觉大脑 ---
-    # 如果环境光线复杂导致 FPS 变低，可以尝试把 use_otsu 改为 False，并在 detector 中手动定阈值
-    detector = Detector(min_area=5000, max_area=500000, use_otsu=True)
+    # 如果环境光线复杂导致 FPS 变低，用 adaptive threshold，并在 detector 中手动定阈值
+    detector = Detector(min_area=5000, max_area=500000, use_adaptive=True)
 
     prev_time = time.time()
 

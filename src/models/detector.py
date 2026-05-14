@@ -12,26 +12,31 @@ class Board:
 
 
 class Detector:
-    def __init__(self, min_area=3000, max_area=500000, use_otsu=True):
+    # 注意：这里的 use_otsu 改为了 use_adaptive 更加名副其实
+    def __init__(self, min_area=3000, max_area=500000, use_adaptive=True):
         self.board_min_area = min_area
         self.board_max_area = max_area
-        self.use_otsu = use_otsu
-        self.manual_threshold = 127  # 如果关闭 OTSU，则使用此手动阈值
+        self.use_adaptive = use_adaptive
+        self.manual_threshold = 127  # 如果关闭自适应，则使用此手动阈值
         self.boards = []
         self.raw = None
         self.binary = None
 
-        # [优化引入] 预留标准的正方形坐标，用于透视变换
+        # 预留标准的正方形坐标，用于透视变换
         self.std_square = np.float32([[0, 0], [0, 100], [100, 100], [100, 0]])
 
     def process_image(self, frame):
         self.raw = frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # [优化引入] 性能开关：算力不够时可随时关闭 OTSU 换取高帧率
-        if self.use_otsu:
-            _, binary = cv2.threshold(
-                gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        # --- [核心优化 1]：放弃全局 OTSU，改用局部自适应阈值 ---
+        # 这样能无视赛场阴影、反光等不均匀光照，完美抠出黑边框
+        if self.use_adaptive:
+            # 参数说明：
+            # 11: 局部计算窗口大小，必须是奇数 (如 11, 15, 21)。太大会变回全局，太小抗噪差
+            # 2:  常数补偿值。如果发现框断断续续，可以调小(比如0)；如果发现噪点多，可以调大(比如5)
+            binary = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
             )
         else:
             _, binary = cv2.threshold(
@@ -42,7 +47,7 @@ class Detector:
         return binary
 
     def find_board(self, binary):
-        """核心：保留第二套强大的 RETR_CCOMP 拓扑查找逻辑"""
+        """保留强大的 RETR_CCOMP 拓扑查找逻辑，增加几何防线"""
         boards = []
         contours, hierarchy = cv2.findContours(
             binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
@@ -66,14 +71,29 @@ class Detector:
             area = cv2.contourArea(contour)
             if self.board_min_area < area < self.board_max_area:
                 peri = cv2.arcLength(contour, True)
+                # 拟合多边形，容差为周长的 2%
                 approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
 
+                # 必须是四边形
                 if len(approx) == 4:
+                    # --- [核心优化 2.1]：凸包性校验 ---
+                    # 物理世界的靶纸透视畸变后必定是凸多边形，排除凹陷的干扰物
+                    if not cv2.isContourConvex(approx):
+                        continue
+
+                    # --- [核心优化 2.2]：长宽比过滤 ---
+                    # 排除电线、细长支架、门缝等长条形的黑色干扰
+                    x, y, w, h = cv2.boundingRect(approx)
+                    # max(h, 1) 是防止极端情况下高度为 0 导致除零崩溃
+                    aspect_ratio = float(w) / max(h, 1)
+                    # 靶纸是A4，这里放宽比例到 0.8 ~ 1.8
+                    if not (0.8 < aspect_ratio < 1.8):
+                        continue
+
                     # 1. 立即转为纯 Python 列表，抛弃 Numpy 包袱
                     pts = approx.reshape(4, 2).tolist()
 
-                    # 2. [优化] 使用纯 Python 内置高阶函数进行点排序
-                    # 根据 x+y 和 x-y 的特征快速定位四个角
+                    # 2. 根据 x+y 和 x-y 的特征快速定位四个角
                     tl = min(pts, key=lambda p: p[0] + p[1])  # 左上
                     br = max(pts, key=lambda p: p[0] + p[1])  # 右下
                     bl = max(pts, key=lambda p: p[0] - p[1])  # 左下
@@ -81,8 +101,7 @@ class Detector:
 
                     sorted_points = [tl, bl, br, tr]
 
-                    # 3. 容错校验（保留了你原版的安全机制，防止畸变导致点重合）
-                    # 这里也将原版的 Numpy 写法替换为了纯 Python 的 sorted
+                    # 3. 容错校验（防止畸变导致点重合）
                     if len(set(tuple(pt) for pt in sorted_points)) < 4:
                         pts_x = sorted(pts, key=lambda p: p[0])
                         pts_y = sorted(pts, key=lambda p: p[1])
@@ -95,7 +114,6 @@ class Detector:
 
                     # 4. 构建 Board 对象
                     board = Board()
-                    # 强制转换为 int 元组，确保完全符合后续 cv2 绘图和求交点的格式要求
                     board.points = [(int(pt[0]), int(pt[1])) for pt in sorted_points]
                     board.area = area
                     board.center = self._calculate_intersection(board.points)
@@ -113,11 +131,7 @@ class Detector:
         return boards
 
     def get_perspective_offset(self, board, target_ratio_x=0.5, target_ratio_y=0.5):
-        """
-        [优化引入] 第一套的透视变换精华
-        不再仅仅局限于打中心点！
-        例如：传入 target_ratio_x=0.2, target_ratio_y=0.2 就可以在倾斜靶纸上精准定位到左上角 20% 处。
-        """
+        """透视变换：精准定位到靶纸内部的任意比例点"""
         if len(board.points) != 4:
             return board.center
 
@@ -156,7 +170,6 @@ class Detector:
         if not board.points or board.center is None:
             return image
 
-        # [优化引入] 使用 polylines 提升 4 倍绘线效率
         pts = np.array(board.points, np.int32)
         cv2.polylines(image, [pts], True, (0, 255, 0), 2)
 
@@ -185,7 +198,7 @@ class Detector:
 
         if debug:
             print(
-                f"Vision Cost - OTSU/Bin: {(t_process - start) * 1000:.1f}ms | Find Board: {(t_find - t_process) * 1000:.1f}ms"
+                f"Vision Cost - AdaptBin: {(t_process - start) * 1000:.1f}ms | Find Board: {(t_find - t_process) * 1000:.1f}ms"
             )
 
         return boards[0] if boards else None
