@@ -25,6 +25,8 @@ class Detector:
         # 预留标准的正方形坐标，用于透视变换
         self.std_square = np.float32([[0, 0], [0, 100], [100, 100], [100, 0]])
 
+        # --- [新增] 记忆上一帧的靶纸中心位置 ---
+        self.last_center = None
     def process_image(self, frame):
         self.raw = frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -187,22 +189,62 @@ class Detector:
         return image
 
     def detect(self, frame, debug=False):
-        """对外接口，加入了耗时探针"""
         start = time.time()
+        self.raw = frame
+        h, w = frame.shape[:2]
 
+        boards = []
+
+        # ================= ROI 局部极速搜索 =================
+        if self.last_center is not None:
+            cx, cy = self.last_center
+            roi_half = 120  # 搜索半径 (可以根据云台运动速度微调)
+
+            # 计算 ROI 边界，防止数组越界
+            x1 = max(0, int(cx - roi_half))
+            y1 = max(0, int(cy - roi_half))
+            x2 = min(w, int(cx + roi_half))
+            y2 = min(h, int(cy + roi_half))
+
+            # 抠出局部小图
+            roi_frame = frame[y1:y2, x1:x2]
+
+            # 只对这块小图做高耗时的自适应阈值
+            bin_roi = self.process_image(roi_frame)
+            boards = self.find_board(bin_roi)
+
+            # 把局部坐标换算回全局坐标 (非常关键！)
+            for board in boards:
+                board.points = [(px + x1, py + y1) for px, py in board.points]
+                board.center = (board.center[0] + x1, board.center[1] + y1)
+
+            # 如果局部搜索成功，更新中心点并直接返回，跳过全局搜索！
+            if boards:
+                self.last_center = boards[0].center
+                self.boards = boards
+                if debug:
+                    print(f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms")
+                return boards[0]
+            else:
+                # 如果局部丢了，说明目标跑太快出了框，立刻清空记忆，转入下面的全局搜索
+                self.last_center = None
+
+        # ================= 全局搜索 (降级) =================
+        # 只有系统刚启动，或者目标飞出 ROI 框时才会执行这里
         bin_img = self.process_image(frame)
-        t_process = time.time()
-
         boards = self.find_board(bin_img)
-        t_find = time.time()
+
+        if boards:
+            self.last_center = boards[0].center
+            self.boards = boards
+        else:
+            self.last_center = None
+            self.boards = []
 
         if debug:
-            print(
-                f"Vision Cost - AdaptBin: {(t_process - start) * 1000:.1f}ms | Find Board: {(t_find - t_process) * 1000:.1f}ms"
-            )
+            print(f"Vision Cost (Global): {(time.time() - start) * 1000:.1f}ms")
 
         return boards[0] if boards else None
-
     def display(self, dis):
         if self.raw is None:
             return None, self.binary
