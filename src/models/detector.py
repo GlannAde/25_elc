@@ -206,35 +206,54 @@ class Detector:
             x2 = min(w, int(cx + roi_half))
             y2 = min(h, int(cy + roi_half))
 
-            # 抠出局部小图
-            roi_frame = frame[y1:y2, x1:x2]
-
-            # 只对这块小图做高耗时的自适应阈值
-            bin_roi = self.process_image(roi_frame)
-            boards = self.find_board(bin_roi)
-
-            # 把局部坐标换算回全局坐标 (非常关键！)
-            for board in boards:
-                board.points = [(px + x1, py + y1) for px, py in board.points]
-                board.center = (board.center[0] + x1, board.center[1] + y1)
-
-            # 如果局部搜索成功，更新中心点并直接返回，跳过全局搜索！
-            if boards:
-                self.last_center = boards[0].center
-                self.boards = boards
-                if debug:
-                    print(f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms")
-                return boards[0]
-            else:
-                # 如果局部丢了，说明目标跑太快出了框，立刻清空记忆，转入下面的全局搜索
+            # --- [新增防线]：如果抠出来的图太小甚至长宽为0，直接放弃局部搜索，转入全局 ---
+            if x2 - x1 < 30 or y2 - y1 < 30:
                 self.last_center = None
+            else:
+                # 抠出局部小图
+                roi_frame = frame[y1:y2, x1:x2]
+
+                # 只对这块小图做高耗时的自适应阈值
+                bin_roi = self.process_image(roi_frame)
+                boards = self.find_board(bin_roi)
+
+                # 把局部坐标换算回全局坐标 (非常关键！)
+                for board in boards:
+                    board.points = [(px + x1, py + y1) for px, py in board.points]
+                    board.center = (board.center[0] + x1, board.center[1] + y1)
+
+                # 如果局部搜索成功，更新中心点并直接返回，跳过全局搜索！
+                if boards:
+                    self.last_center = boards[0].center
+                    self.boards = boards
+                    if debug:
+                        print(f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms")
+                    return boards[0]
+                else:
+                    self.last_center = None
 
         # ================= 全局搜索 (降级) =================
         # 只有系统刚启动，或者目标飞出 ROI 框时才会执行这里
-        bin_img = self.process_image(frame)
+        # [核心优化]：全图搜索时缩小画面，将算力消耗降低 75%，防止产生 Low 帧！
+        small_frame = cv2.resize(frame, (w // 2, h // 2))
+
+        # 因为画面长宽缩小了一半，面积阈值必须除以 4
+        orig_min_area = self.board_min_area
+        self.board_min_area = orig_min_area / 4.0
+
+        bin_img = self.process_image(small_frame)
         boards = self.find_board(bin_img)
 
+        # 恢复面积阈值
+        self.board_min_area = orig_min_area
+
         if boards:
+            # [极其关键]：将找到的小图坐标，按比例放大回原图的真实坐标
+            for b in boards:
+                b.points = [(px * 2, py * 2) for px, py in b.points]
+                b.center = (b.center[0] * 2, b.center[1] * 2)
+                b.area = b.area * 4
+
             self.last_center = boards[0].center
             self.boards = boards
         else:
