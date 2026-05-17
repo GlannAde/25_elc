@@ -1,10 +1,11 @@
 import enum  # 枚举库
+import queue
 import struct
 import sys
-import time
-import serial
-import queue
 import threading
+import time
+
+import serial
 
 # 定义系统参数枚举，对应树莓派例程中的 key
 """
@@ -50,7 +51,7 @@ class EmmMotor:
         self._init_serial()
 
         # ================= 新增：异步发送队列与守护线程 =================
-        self.cmd_queue = queue.Queue(maxsize=100) # 指令缓冲区
+        self.cmd_queue = queue.Queue(maxsize=100)  # 指令缓冲区
         self.running = True
         self.send_thread = threading.Thread(target=self._send_loop, daemon=True)
         self.send_thread.start()
@@ -86,7 +87,10 @@ class EmmMotor:
             try:
                 self.cmd_queue.put_nowait(cmd_bytes)
             except queue.Full:
-                print(f"[警告] {self.port} 串口发送队列已满，指令被丢弃，请检查波特率！")
+                print(
+                    f"[警告] {self.port} 串口发送队列已满，指令被丢弃，请检查波特率！"
+                )
+
     def _init_serial(self):
         """打开串口的操作"""
         # 用try有利于检查错误
@@ -166,7 +170,9 @@ class EmmMotor:
 
         cmd.append(0x6B)  # 校验字节
 
-        self._send_cmd(bytes(cmd),sync = True)  # 读参数需要同步发送，确保命令发出后立刻读取响应
+        self._send_cmd(
+            bytes(cmd), sync=True
+        )  # 读参数需要同步发送，确保命令发出后立刻读取响应
 
         # 读取响应 (根据参数不同，返回长度可能不同，这里尝试读取一定长度)
         # 注意：实际项目中需要根据具体协议文档确定返回字节数
@@ -380,9 +386,9 @@ class EmmMotor:
 
     def close(self):
         """关闭串口与线程"""
-        self.running = False # 通知守护线程退出
+        self.running = False  # 通知守护线程退出
         if self.send_thread.is_alive():
-            self.send_thread.join(timeout=0.5) # 等待线程安全结束
+            self.send_thread.join(timeout=0.5)  # 等待线程安全结束
 
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()

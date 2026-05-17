@@ -1,8 +1,10 @@
 import time
+
 import wiringpi
 
 # 全局初始化：使用物理引脚编号 (对应原代码的 GPIO.BOARD)
 wiringpi.wiringPiSetupPhys()
+
 
 class GPIN:
     def __init__(self, pin=1, mode=1):

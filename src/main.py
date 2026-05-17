@@ -29,7 +29,7 @@ GEAR_RATIO_PITCH = 9.23
 # 初始化相机和视觉算法模块
 camera = Camera(index=CAMERA_INDEX, width=640, height=480, format="MJPG", fps=120)
 detector = Detector(min_area=5000, max_area=500000, use_adaptive=True)
-tracker = Tracker(f_pixel_h=725.6, real_height=17.5, use_kf=USE_KF)
+tracker = Tracker(real_width=21.0, real_height=17.5, use_kf=USE_KF)
 
 # [硬件屏蔽] 电机初始化
 # stepper_yaw = EmmMotor(port=YAW_PORT, baudrate=115200, timeout=1, motor_id=1)
@@ -43,6 +43,7 @@ pid_pitch = PIDController(Kp=0.0, Ki=0.0, Kd=0.0, dt=1 / 120.0)
 # lazer = GPIN(pin=16, mode=1)
 # heart_beat = GPIN(pin=18, mode=1)
 # ========================================================
+
 
 def nothing(x):
     pass
@@ -91,9 +92,7 @@ def update_params():
 
 
 def main():
-    print(
-        "\n 视觉正常启动\n   [按 'q' / 按 Ctrl+C 退出]"
-    )
+    print("\n 视觉正常启动\n   [按 'q' / 按 Ctrl+C 退出]")
 
     # [硬件屏蔽]
     # try:
@@ -126,7 +125,9 @@ def main():
             # --- 2. 视觉解算 ---
             target = detector.detect(frame)
             yaw_err, pitch_err, dist, status, laser_pos, smooth_center, aim_point = (
-                tracker.track(target, mode=current_mode, radius_px=100, period_sec=3.0)
+                tracker.track(
+                    target, mode=current_mode, real_radius_m=0.15, period_sec=3.0
+                )
             )
 
             # --- 3. FPS 计算 ---

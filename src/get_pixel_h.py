@@ -1,6 +1,9 @@
 import math
+
 import cv2
+
 from models.detector import Detector
+
 
 def calibrate_focal_length():
     # --- 1. 手动设置已知物理参数 ---
@@ -93,6 +96,7 @@ def calibrate_focal_length():
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     calibrate_focal_length()

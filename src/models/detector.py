@@ -27,6 +27,7 @@ class Detector:
 
         # --- [新增] 记忆上一帧的靶纸中心位置 ---
         self.last_center = None
+
     def process_image(self, frame):
         self.raw = frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -213,9 +214,16 @@ class Detector:
                 # 抠出局部小图
                 roi_frame = frame[y1:y2, x1:x2]
 
-                # 只对这块小图做高耗时的自适应阈值
-                bin_roi = self.process_image(roi_frame)
-                boards = self.find_board(bin_roi)
+                # --- 遗漏的纯色背景防爆炸优化 ---
+                gray_roi = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+                variance = cv2.meanStdDev(gray_roi)[1][0][0] ** 2
+
+                if variance < 50.0:
+                    self.last_center = None
+                else:
+                    # 只对这块小图做高耗时的自适应阈值
+                    bin_roi = self.process_image(roi_frame)
+                    boards = self.find_board(bin_roi)
 
                 # 把局部坐标换算回全局坐标 (非常关键！)
                 for board in boards:
@@ -227,7 +235,9 @@ class Detector:
                     self.last_center = boards[0].center
                     self.boards = boards
                     if debug:
-                        print(f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms")
+                        print(
+                            f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms"
+                        )
                     return boards[0]
                 else:
                     self.last_center = None
@@ -264,6 +274,7 @@ class Detector:
             print(f"Vision Cost (Global): {(time.time() - start) * 1000:.1f}ms")
 
         return boards[0] if boards else None
+
     def display(self, dis):
         if self.raw is None:
             return None, self.binary

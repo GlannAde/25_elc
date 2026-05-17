@@ -1,13 +1,11 @@
+# tracker.py 完整重构
 import math
 import time
-
-# 枚举库
 from enum import IntEnum
 
+import cv2
 import numpy as np
-
-# 引入 3D 卡尔曼滤波器
-from models.Kalman import KalmanFilter3D
+import yaml
 
 
 class Status(IntEnum):
@@ -17,21 +15,17 @@ class Status(IntEnum):
 
 
 class Tracker:
-    def __init__(
-        self,
-        img_width=640,
-        img_height=480,
-        f_pixel_h=725.6,
-        real_height=17.5,
-        use_kf=True,
-    ):
-        self.img_width = img_width
-        self.img_height = img_height
+    def __init__(self, real_width=21.0, real_height=17.5, use_kf=True):
+        """
+        :param real_width: 靶纸物理宽度 (单位: 厘米)
+        :param real_height: 靶纸物理高度 (单位: 厘米)
+        """
+        # 将厘米转换为标准单位：米 (自瞄建议统一使用三维国际单位制)
+        self.real_width = real_width / 100.0
+        self.real_height = real_height / 100.0
 
-        self.f_pixel_h = f_pixel_h
-        self.real_height = real_height
-
-        self.ref_point = np.array([-0.15, 1.35, 0.0])
+        # 相机坐标系轴向偏置补偿 (米)
+        self.ref_point = np.array([-0.0, 0.0, 0.0])
         self.yaw_bias = -2.3
         self.pitch_bias = -0.2
 
@@ -39,19 +33,39 @@ class Tracker:
         self.lost_count = 0
         self.frame_lost_tol = 8
         self.last_time = None
-        self.laser_pos = None
 
         self.onfire = False
-        self.fire_deadzone = 1.5
+        self.fire_deadzone = 1.5  # 允许开火的角度误差角度
 
-        self.use_kf = use_kf
-        if self.use_kf:
-            # 3D 滤波器的初始化
-            self.kf = KalmanFilter3D(
-                q_scale=0.35, r_xy_scale=0.1, r_dist_scale=2.0, default_dt=1 / 120.0
+        # 1. 定义三维物理模型点 (严格对应 detector.py 的 [tl, bl, br, tr] 顺序)
+        W = self.real_width
+        H = self.real_height
+        self.object_points = np.array(
+            [
+                [-W / 2, -H / 2, 0.0],  # 左上 tl
+                [-W / 2, H / 2, 0.0],  # 左下 bl
+                [W / 2, H / 2, 0.0],  # 右下 br
+                [W / 2, -H / 2, 0.0],  # 右上 tr
+            ],
+            dtype=np.float32,
+        )
+
+        # 2. 载入相机内参 (此处使用你的近似参数，标定后请替换)
+        try:
+            self.camera_matrix, self.dist_coeffs = self.load_camera_params(
+                "config/camera_params.yaml"
             )
+            print("成功加载相机 YAML 配置文件！")
+        except FileNotFoundError:
+            print("[警告] 未找到 camera_params.yaml，使用默认近似内参！")
+            self.camera_matrix = np.array(
+                [[725.6, 0.0, 320.0], [0.0, 725.6, 240.0], [0.0, 0.0, 1.0]],
+                dtype=np.float32,
+            )
+            self.dist_coeffs = np.zeros((5, 1), dtype=np.float32)
 
     def time_diff(self):
+        # 计算时间间隔
         current_time = time.time_ns()
         if self.last_time is None:
             self.last_time = current_time
@@ -60,129 +74,157 @@ class Tracker:
         self.last_time = current_time
         return min(diff, 0.1)
 
-    def get_dist(self, board):
-        pts = board.points
-        h_left = math.sqrt((pts[0][0] - pts[1][0]) ** 2 + (pts[0][1] - pts[1][1]) ** 2)
-        h_right = math.sqrt((pts[3][0] - pts[2][0]) ** 2 + (pts[3][1] - pts[2][1]) ** 2)
-        avg_h_px = (h_left + h_right) / 2.0
+    def load_camera_params(self, yaml_path):
+        """加载标准的 ROS 格式相机标定 YAML 文件"""
+        import numpy as np
 
-        if avg_h_px <= 1e-3:
-            return 1000.0
+        with open(yaml_path, "r") as f:
+            config = yaml.safe_load(f)
 
-        dist = (self.real_height * self.f_pixel_h) / avg_h_px
-        return dist
+        # 读取 3x3 相机内参矩阵
+        camera_matrix = np.array(
+            config["camera_matrix"]["data"], dtype=np.float32
+        ).reshape(config["camera_matrix"]["rows"], config["camera_matrix"]["cols"])
+
+        # 读取 1x5 畸变系数 (注意这里的键名改成了 distortion_coefficients)
+        dist_coeffs = np.array(
+            config["distortion_coefficients"]["data"], dtype=np.float32
+        ).reshape(
+            config["distortion_coefficients"]["rows"],
+            config["distortion_coefficients"]["cols"],
+        )
+
+        return camera_matrix, dist_coeffs
+
+    def solve_pnp(self, board):
+        """核心：通过 PnP 算法获取目标的 3D 物理空间坐标"""
+        image_points = np.array(board.points, dtype=np.float32)
+
+        # 使用专为平面 4 点定制的 IPPE 算法
+        success, rvec, tvec = cv2.solvePnP(
+            self.object_points,
+            image_points,
+            self.camera_matrix,
+            self.dist_coeffs,
+            flags=cv2.SOLVEPNP_IPPE,
+        )
+
+        if success:
+            # tvec 包含了相机坐标系下的 [X, Y, Z] (单位: 米)
+            return True, tvec[0][0], tvec[1][0], tvec[2][0]
+        return False, 0.0, 0.0, 0.0
 
     def filter_and_predict(self, target):
         dt = self.time_diff()
 
+        # 解析当前的真实物理三维坐标
+        success = False
+        raw_x, raw_y, raw_z = 0.0, 0.0, 0.0
+        if target and target.points:
+            success, raw_x, raw_y, raw_z = self.solve_pnp(target)
+
+        # 分支1：不开启卡尔曼滤波
         if not self.use_kf:
-            if target and target.center:
+            if success:
                 self.status = Status.TRACK
-                return target.center[0], target.center[1], self.get_dist(target)
+                return raw_x, raw_y, raw_z
             else:
                 self.status = Status.LOST
-                return self.img_width / 2, self.img_height / 2, 0.0
+                return 0.0, 0.0, 0.1
 
-        if target and target.center:
-            # 捕捉到目标
+        # 分支2：开启卡尔曼滤波
+        if success:
             if self.status == Status.LOST:
-                self.kf.reset()
+                self.kf.reset(raw_x, raw_y, raw_z)  # 丢失重捕【热启动】
             self.status = Status.TRACK
             self.lost_count = 0
 
-            # 先预测时间步长，再用真实值更新
             self.kf.predict(dt=dt)
-            return self.kf.update(
-                target.center[0], target.center[1], self.get_dist(target)
-            )
-
+            return self.kf.update(raw_x, raw_y, raw_z)
         else:
-            # 目标丢失
             self.lost_count += 1
             if self.lost_count <= self.frame_lost_tol:
                 self.status = Status.TMP_LOST
-                # 仅靠惯性预测
-                return self.kf.predict(dt=dt)
+                return self.kf.predict(dt=dt)  # 靠3D惯性继续预测
             else:
                 self.status = Status.LOST
                 self.kf.reset()
-                return self.img_width / 2, self.img_height / 2, 0.0
+                return 0.0, 0.0, 0.1
 
-    def solve(self, cx, cy, dist):
-        if dist <= 0:
-            dist = 0.1
+    def project_3d_to_2d(self, x, y, z):
+        """工具函数：将三维物理坐标重新投影回二维屏幕（用于画瞄准十字）"""
+        pt_3d = np.array([[x, y, z]], dtype=np.float32)
+        rvec_zero = np.zeros((3, 1), dtype=np.float32)
+        tvec_zero = np.zeros((3, 1), dtype=np.float32)
+        img_pts, _ = cv2.projectPoints(
+            pt_3d, rvec_zero, tvec_zero, self.camera_matrix, self.dist_coeffs
+        )
+        return int(img_pts[0][0][0]), int(img_pts[0][0][1])
 
-        offset_x = cx - self.img_width / 2
-        offset_y = cy - self.img_height / 2
-
-        dx = offset_x + (self.ref_point[0] * self.f_pixel_h / dist)
-        dy = offset_y + (self.ref_point[1] * self.f_pixel_h / dist)
-
-        self.laser_pos = (int(self.img_width / 2 + dx), int(self.img_height / 2 + dy))
-
-        yaw = -math.degrees(math.atan2(dx, self.f_pixel_h))
-        pitch = math.degrees(math.atan2(dy, self.f_pixel_h))
-
-        yaw += self.yaw_bias
-        pitch += self.pitch_bias
-
-        return yaw, pitch, dist
-
-    def track(self, board, mode="TRACK", radius_px=80, period_sec=3.0):
+    def track(self, board, mode="TRACK", real_radius_m=0.15, period_sec=3.0):
         """
-        mode: "TRACK" (正常追踪), "CIRCLE" (画圆模式)
-        radius_px: 画圆半径(像素)
-        period_sec: 画一圈所需时间(秒)
+        :param real_radius_m: 物理画圆半径 (单位: 米， 0.15m = 15cm)
         """
-        filtered_cx, filtered_cy, filtered_dist = self.filter_and_predict(board)
+        # 1. 滤波得到当前三维空间最优估计坐标
+        fx, fy, fz = self.filter_and_predict(board)
 
         if self.status != Status.LOST:
-            # ================= 绝招 1：提取速度，增加动态提前量 =================
-            if self.use_kf:
-                # 从 6 维状态矩阵中直接提取 X 轴和 Y 轴的运动速度 (像素/秒)
-                vx = self.kf.kf.statePost[3, 0]
-                vy = self.kf.kf.statePost[4, 0]
-            else:
-                vx, vy = 0.0, 0.0
+            # 从 3D 卡尔曼滤波器提取物理空间运动速度 (米/秒)
+            vx = self.kf.kf.statePost[3, 0] if self.use_kf else 0.0
+            vy = self.kf.kf.statePost[4, 0] if self.use_kf else 0.0
+            vz = self.kf.kf.statePost[5, 0] if self.use_kf else 0.0
 
-            # 提前量时间补偿 (根据你的电机响应和视觉延迟微调，通常 0.05 ~ 0.1 秒)
-            sys_delay = 0.05
+            sys_delay = 0.05  # 提前量时间补偿 (秒)
 
-            # 计算预测目标点
-            aim_cx = filtered_cx + vx * sys_delay
-            aim_cy = filtered_cy + vy * sys_delay
+            # 计算带有物理速度提前量的 3D 瞄准点
+            aim_x = fx + vx * sys_delay
+            aim_y = fy + vy * sys_delay
+            aim_z = fz + vz * sys_delay
 
-            # ================= 绝招 2：叠加视觉闭环画圆轨迹 =================
+            # 2. 叠加三维闭环物理画圆
             if mode == "CIRCLE":
                 t = time.time()
-                # 计算角速度 omega
                 omega = 2 * math.pi / period_sec
-                # 叠加圆周运动的参数方程
-                aim_cx += radius_px * math.cos(omega * t)
-                aim_cy += radius_px * math.sin(omega * t)
+                # 直接在三维空间坐标系上叠加圆周运算
+                aim_x += real_radius_m * math.cos(omega * t)
+                aim_y += real_radius_m * math.sin(omega * t)
 
-            # ================= 逆运动学解算 =================
-            # 把算出来的虚拟瞄准点扔给解算器
-            yaw_err, pitch_err, dist = self.solve(aim_cx, aim_cy, filtered_dist)
+            # 3. 逆运动学解算（在三维物理坐标系下，公式变得极其纯粹直观！）
+            # OpenCV 轴向：X轴向右，Y轴向下，Z轴向前
+            # 计算 Yaw：物体横向偏移 / 前向深度
+            yaw_err = -math.degrees(
+                math.atan2(aim_x + self.ref_point[0], aim_z + self.ref_point[2])
+            )
+            # 计算 Pitch：物体纵向偏移 / 水平深度
+            horizontal_dist = math.hypot(aim_x, aim_z)
+            pitch_err = math.degrees(
+                math.atan2(aim_y + self.ref_point[1], max(horizontal_dist, 0.1))
+            )
 
-            # --- 动态开火决策 ---
-            if (
+            yaw_err += self.yaw_bias
+            pitch_err += self.pitch_bias
+
+            # 开火控制决策
+            self.onfire = (
                 self.status == Status.TRACK
                 and abs(yaw_err) < self.fire_deadzone
                 and abs(pitch_err) < self.fire_deadzone
-            ):
-                self.onfire = True
-            else:
-                self.onfire = False
+            )
 
-            # 原理的平滑中心点（用于画绿色十字）
-            smooth_center = (int(filtered_cx), int(filtered_cy))
-            # 新增的虚拟瞄准点（用于画蓝色十字，直观看到系统的"提前量"和"画圆轨迹"）
-            aim_point = (int(aim_cx), int(aim_cy))
+            # 将 3D 预测出的点逆向投影到 2D 像素屏幕上，方便 OpenCV 窗口画线展示
+            smooth_center_2d = self.project_3d_to_2d(fx, fy, fz)
+            aim_point_2d = self.project_3d_to_2d(aim_x, aim_y, aim_z)
+            laser_pos_2d = self.project_3d_to_2d(0.0, 0.0, fz)  # 枪管基准轴中心投影
 
-            # 注意返回值多加了一个 aim_point
-            return yaw_err, pitch_err, dist, self.status, self.laser_pos, smooth_center, aim_point
+            return (
+                yaw_err,
+                pitch_err,
+                fz,
+                self.status,
+                laser_pos_2d,
+                smooth_center_2d,
+                aim_point_2d,
+            )
         else:
-            self.laser_pos = None
             self.onfire = False
             return 0.0, 0.0, 0.0, self.status, None, None, None
