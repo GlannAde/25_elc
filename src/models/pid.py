@@ -60,7 +60,9 @@ class PIDController:
             # 优化1 一阶低通滤波 (不完全微分)
             # 公式: D_current = alpha * D_raw + (1 - alpha) * D_last
             # alpha 越小，越平滑，抗噪越好，但响应会稍微变慢。0.3是个不错的经验值。
-            alpha = 0.3
+            tau = 0.02
+            alpha = dt / (dt + tau)
+            
             derivative = alpha * raw_derivative + (1.0 - alpha) * self.last_derivative
         else:
             derivative = 0.0

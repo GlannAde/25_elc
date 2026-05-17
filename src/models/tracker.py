@@ -75,6 +75,7 @@ class Tracker:
     def filter_and_predict(self, target):
         dt = self.time_diff()
 
+        # ================== 分支1：不使用KF，直接输出 ==================
         if not self.use_kf:
             if target and target.center:
                 self.status = Status.TRACK
@@ -83,10 +84,13 @@ class Tracker:
                 self.status = Status.LOST
                 return self.img_width / 2, self.img_height / 2, 0.0
 
+        # ================== 分支2：使用KF进行滤波预测 ==================
         if target and target.center:
             # 捕捉到目标
             if self.status == Status.LOST:
-                self.kf.reset()
+                # 目标丢失后重新捕获，使用真实坐标"热启动"卡尔曼滤波器
+                self.kf.reset(target.center[0], target.center[1], self.get_dist(target))
+
             self.status = Status.TRACK
             self.lost_count = 0
 
@@ -105,6 +109,7 @@ class Tracker:
                 return self.kf.predict(dt=dt)
             else:
                 self.status = Status.LOST
+                # 彻底丢失，清空卡尔曼状态（这里调用无参的 reset）
                 self.kf.reset()
                 return self.img_width / 2, self.img_height / 2, 0.0
 
@@ -128,7 +133,7 @@ class Tracker:
 
         return yaw, pitch, dist
 
-    def track(self, board, mode="TRACK", radius_px=80, period_sec=3.0):
+    def track(self, board, mode="TRACK", real_radius_m = 0.15, period_sec=3.0):
         """
         mode: "TRACK" (正常追踪), "CIRCLE" (画圆模式)
         radius_px: 画圆半径(像素)
@@ -152,15 +157,20 @@ class Tracker:
             aim_cx = filtered_cx + vx * sys_delay
             aim_cy = filtered_cy + vy * sys_delay
 
-            # ================= 绝招 2：叠加视觉闭环画圆轨迹 =================
+            # ================= 2：叠加视觉闭环画圆轨迹 =================
             if mode == "CIRCLE":
                 t = time.time()
-                # 计算角速度 omega
                 omega = 2 * math.pi / period_sec
-                # 叠加圆周运动的参数方程
-                aim_cx += radius_px * math.cos(omega * t)
-                aim_cy += radius_px * math.sin(omega * t)
 
+                # 【核心修改】动态计算当前距离下的像素半径
+                # 公式：像素长度 = (物理长度 * 焦距) / 距离
+                # filtered_dist 必须大于 0，防止除以 0 崩溃
+                safe_dist = max(filtered_dist, 0.1)
+                dynamic_radius_px = (real_radius_m * self.f_pixel_h) / safe_dist
+
+                # 使用动态计算出的像素半径
+                aim_cx += dynamic_radius_px * math.cos(omega * t)
+                aim_cy += dynamic_radius_px * math.sin(omega * t)
             # ================= 逆运动学解算 =================
             # 把算出来的虚拟瞄准点扔给解算器
             yaw_err, pitch_err, dist = self.solve(aim_cx, aim_cy, filtered_dist)

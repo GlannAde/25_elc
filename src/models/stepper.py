@@ -50,7 +50,7 @@ class EmmMotor:
         self._init_serial()
 
         # ================= 新增：异步发送队列与守护线程 =================
-        self.cmd_queue = queue.Queue(maxsize=100) # 指令缓冲区
+        self.cmd_queue = queue.Queue(maxsize=3) # 指令缓冲区
         self.running = True
         self.send_thread = threading.Thread(target=self._send_loop, daemon=True)
         self.send_thread.start()
@@ -83,10 +83,15 @@ class EmmMotor:
                 print(f"[错误] 串口 {self.port} 同步发送异常: {e}")
         else:
             # 异步发送：扔进队列就跑，主线程瞬间返回
-            try:
-                self.cmd_queue.put_nowait(cmd_bytes)
-            except queue.Full:
-                print(f"[警告] {self.port} 串口发送队列已满，指令被丢弃，请检查波特率！")
+            if self.cmd_queue.full():
+                try:
+                    self.cmd_queue.get_nowait() # 丢弃滞后指令
+                except queue.Empty:
+                    pass
+        try:
+            self.cmd_queue.put_nowait(cmd_bytes)
+        except queue.Full:
+            pass
     def _init_serial(self):
         """打开串口的操作"""
         # 用try有利于检查错误

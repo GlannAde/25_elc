@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 
-
 class KalmanFilter3D:
     """
     高频追踪优化的 3D 卡尔曼滤波器
@@ -73,7 +72,13 @@ class KalmanFilter3D:
         estimate = self.kf.correct(measure)
         return estimate[0, 0], estimate[1, 0], estimate[2, 0]
 
-    def reset(self):
-        """目标丢失后重新捕获时调用，清空历史惯性"""
-        self.kf.statePost = np.zeros((6, 1), np.float32)
+    def reset(self, init_x=0.0, init_y=0.0, init_dist=0.0):
+        """目标丢失后重新捕获时调用，清空历史惯性并热启动"""
+        # 将初始位置赋予状态矩阵，速度(vx, vy, vz)强行设为0
+        self.kf.statePost = np.array([
+            [init_x],[init_y],[init_dist],
+            [0.0],[0.0],[0.0]
+        ], np.float32)
+
+        # 放大误差协方差，表示此时对模型不太信任，下一次 update 时会极其信任视觉的真实测量值
         self.kf.errorCovPost = np.eye(6, dtype=np.float32) * 1000.0

@@ -1,3 +1,4 @@
+"""焦距标定程序：通过已知距离和物理尺寸, 计算像素焦距 f_pixel_h"""
 import math
 import cv2
 from models.detector import Detector

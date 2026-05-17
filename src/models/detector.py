@@ -54,12 +54,15 @@ class Detector:
         contours, hierarchy = cv2.findContours(
             binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
         )
+        # 1. 判断是否为 None
+        # 2. 判断轮廓列表是否为空
+        # 3. 判断 hierarchy 数组维度是否正常 (至少需要是 1xNx4)
 
-        if hierarchy is None:
+        if hierarchy is None or len(contours) == 0 or len(hierarchy) == 0 or len(hierarchy[0]) != len(contours):
             self.boards = []
             return []
 
-        # 优先寻内轮廓，没有则寻外轮廓
+        # 校验通过后，再安全地执行列表推导式
         inner_contours = [
             (i, c) for i, c in enumerate(contours) if hierarchy[0][i][3] != -1
         ]
@@ -206,31 +209,43 @@ class Detector:
             x2 = min(w, int(cx + roi_half))
             y2 = min(h, int(cy + roi_half))
 
-            # --- [新增防线]：如果抠出来的图太小甚至长宽为0，直接放弃局部搜索，转入全局 ---
+            # --- [新增防线 1]：如果抠出来的图太小甚至长宽为0，直接放弃 ---
             if x2 - x1 < 30 or y2 - y1 < 30:
                 self.last_center = None
             else:
                 # 抠出局部小图
                 roi_frame = frame[y1:y2, x1:x2]
 
-                # 只对这块小图做高耗时的自适应阈值
-                bin_roi = self.process_image(roi_frame)
-                boards = self.find_board(bin_roi)
+                # ================= 纯色背景防爆炸优化 =================
+                # 自适应阈值在纯色无纹理区域会把极小的图像噪点放大成满屏的黑白斑点
+                # 计算这块区域的灰度方差，方差越小，说明画面越“纯色”
+                gray_roi = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+                # cv2.meanStdDev 返回 (mean, stddev)，方差 = 标准差的平方
+                variance = cv2.meanStdDev(gray_roi)[1][0][0] ** 2
 
-                # 把局部坐标换算回全局坐标 (非常关键！)
-                for board in boards:
-                    board.points = [(px + x1, py + y1) for px, py in board.points]
-                    board.center = (board.center[0] + x1, board.center[1] + y1)
-
-                # 如果局部搜索成功，更新中心点并直接返回，跳过全局搜索！
-                if boards:
-                    self.last_center = boards[0].center
-                    self.boards = boards
-                    if debug:
-                        print(f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms")
-                    return boards[0]
-                else:
+                # 50.0 是一个经验阈值(对应标准差约 7 左右)，可以屏蔽绝大多数相机底噪
+                if variance < 50.0:
+                    # 画面太干净了，不可能是靶纸（靶纸有黑白强对比），直接判断丢失！
                     self.last_center = None
+                else:
+                    # 只对这块不是纯色的小图做高耗时的自适应阈值
+                    bin_roi = self.process_image(roi_frame)
+                    boards = self.find_board(bin_roi)
+
+                    # 把局部坐标换算回全局坐标 (非常关键！)
+                    for board in boards:
+                        board.points = [(px + x1, py + y1) for px, py in board.points]
+                        board.center = (board.center[0] + x1, board.center[1] + y1)
+
+                    # 如果局部搜索成功，更新中心点并直接返回，跳过全局搜索！
+                    if boards:
+                        self.last_center = boards[0].center
+                        self.boards = boards
+                        if debug:
+                            print(f"Vision Cost (ROI): {(time.time() - start) * 1000:.1f}ms")
+                        return boards[0]
+                    else:
+                        self.last_center = None
 
         # ================= 全局搜索 (降级) =================
         # 只有系统刚启动，或者目标飞出 ROI 框时才会执行这里

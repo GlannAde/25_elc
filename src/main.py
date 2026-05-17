@@ -1,3 +1,4 @@
+"""主程序入口：负责系统初始化、主循环控制、模块协同以及资源清理。"""
 import time
 
 import cv2
@@ -43,6 +44,7 @@ pid_pitch = PIDController(Kp=0.0, Ki=0.0, Kd=0.0, dt=1 / 120.0)
 # lazer = GPIN(pin=16, mode=1)
 # heart_beat = GPIN(pin=18, mode=1)
 # ========================================================
+
 
 def nothing(x):
     pass
@@ -91,9 +93,7 @@ def update_params():
 
 
 def main():
-    print(
-        "\n 视觉正常启动\n   [按 'q' / 按 Ctrl+C 退出]"
-    )
+    print("\n 视觉正常启动\n   [按 'q' / 按 Ctrl+C 退出]")
 
     # [硬件屏蔽]
     # try:
@@ -151,8 +151,8 @@ def main():
                 pid_yaw.reset()
                 pid_pitch.reset()
 
-            # --- 5. 防卡顿打印 (每 10 帧打印一次，降低 I/O 阻塞) ---
-            if render_counter % 10 == 0:
+            # --- 5. 防卡顿打印 (每 60 帧打印一次，降低 I/O 阻塞) ---
+            if render_counter % 60 == 0:
                 status_map = {
                     Status.TRACK: "TRACKING",
                     Status.TMP_LOST: "PREDICTING",
