@@ -153,7 +153,7 @@ def main():
                 pid_pitch.reset()
 
             # --- 5. 防卡顿打印 (每 10 帧打印一次，降低 I/O 阻塞) ---
-            if render_counter % 10 == 0:
+            if render_counter % 100== 0:
                 status_map = {
                     Status.TRACK: "TRACKING",
                     Status.TMP_LOST: "PREDICTING",
@@ -161,7 +161,7 @@ def main():
                 }
                 print(
                     f"[{render_counter}] FPS: {fps:>5.1f} | {status_map[status]:<10} | "
-                    f"Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
+                    f"Dist: {dist:>5.2f}m | Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
                 )
 
             # ================= 高帧率渲染解耦区 =================

@@ -26,9 +26,11 @@ class Tracker:
         self.real_height = real_height / 100.0
 
         # 相机坐标系轴向偏置补偿 (米)
-        self.ref_point = np.array([-0.0, 0.0, 0.0])
-        self.yaw_bias = -2.3
+        self.ref_point = np.array([0.03, 0.0, 0.0])
+        self.yaw_bias = 0.0
         self.pitch_bias = -0.2
+
+        self.ref_point = np.array([0.03, 0.0, 0.0])
 
         self.status = Status.LOST
         self.lost_count = 0
@@ -40,7 +42,7 @@ class Tracker:
 
         if self.use.kf:
             self.kf = KalmanFilter3D
-            
+
         # 1. 定义三维物理模型点 (严格对应 detector.py 的 [tl, bl, br, tr] 顺序)
         W = self.real_width
         H = self.real_height
