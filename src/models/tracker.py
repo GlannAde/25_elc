@@ -2,6 +2,7 @@
 import math
 import time
 from enum import IntEnum
+from models.Kalman import KalmanFilter3D
 
 import cv2
 import numpy as np
@@ -29,6 +30,7 @@ class Tracker:
         self.yaw_bias = -2.3
         self.pitch_bias = -0.2
 
+        self.use_kf = use_kf
         self.status = Status.LOST
         self.lost_count = 0
         self.frame_lost_tol = 8
@@ -36,6 +38,9 @@ class Tracker:
 
         self.onfire = False
         self.fire_deadzone = 1.5  # 允许开火的角度误差角度
+
+        if self.use_kf:
+            self.kf = KalmanFilter3D()
 
         # 1. 定义三维物理模型点 (严格对应 detector.py 的 [tl, bl, br, tr] 顺序)
         W = self.real_width

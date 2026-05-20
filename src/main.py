@@ -9,13 +9,14 @@ from models.pid import PIDController
 
 # [硬件屏蔽] from models.status import GPIN
 # --- 导入硬件驱动模块 ---
-# [硬件屏蔽] from models.stepper import EmmMotor
+# [硬件屏蔽]
+from models.stepper import EmmMotor
 from models.tracker import Status, Tracker
 
 # ==================== 系统参数配置区 ====================
 CAMERA_INDEX = 0  # 摄像头索引 (如果在 Windows 测试，通常是 0 或 1)
-YAW_PORT = "/dev/ttyACM0"
-PITCH_PORT = "/dev/ttyACM1"
+# YAW_PORT = "/dev/ttyACM1"
+PITCH_PORT = "/dev/ttyACM0"
 
 USE_KF = True  # 是否启用 3D 卡尔曼滤波预测
 SHOW_WINDOWS = True  # 是否显示调试画面和参数控制台 (设为 False 可榨干极限性能)
@@ -33,7 +34,7 @@ tracker = Tracker(real_width=21.0, real_height=17.5, use_kf=USE_KF)
 
 # [硬件屏蔽] 电机初始化
 # stepper_yaw = EmmMotor(port=YAW_PORT, baudrate=115200, timeout=1, motor_id=1)
-# stepper_pitch = EmmMotor(port=PITCH_PORT, baudrate=115200, timeout=1, motor_id=2)
+stepper_pitch = EmmMotor(port=PITCH_PORT, baudrate=115200, timeout=1, motor_id=2)
 
 # PID 初始化 (保留 PID 对象用于在终端观察输出运算结果)
 pid_yaw = PIDController(Kp=0.0, Ki=0.0, Kd=0.0, dt=1 / 120.0)
@@ -95,11 +96,11 @@ def main():
     print("\n 视觉正常启动\n   [按 'q' / 按 Ctrl+C 退出]")
 
     # [硬件屏蔽]
-    # try:
-    #     stepper_yaw.emm_v5_en_control(state=True)
-    #     stepper_pitch.emm_v5_en_control(state=True)
-    # except Exception as e:
-    #     pass
+    try:
+        #    stepper_yaw.emm_v5_en_control(state=True)
+        stepper_pitch.emm_v5_en_control(state=True)
+    except Exception as e:  # noqa: F841
+        pass
 
     if SHOW_WINDOWS:
         init_board()
@@ -141,26 +142,31 @@ def main():
 
             # --- 4. PID 控制解算 ---
             if status in (Status.TRACK, Status.TMP_LOST):
-                correction_yaw = pid_yaw.compute(yaw_err)
+                # correction_yaw = pid_yaw.compute(yaw_err)
                 correction_pitch = pid_pitch.compute(pitch_err)
 
                 # [硬件屏蔽] 发送给电机
                 # stepper_yaw.emm_v5_move_to_angle(angle_deg=-correction_yaw * GEAR_RATIO_YAW, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
-                # stepper_pitch.emm_v5_move_to_angle(angle_deg=-correction_pitch * GEAR_RATIO_PITCH, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
+                stepper_pitch.emm_v5_move_to_angle(
+                    angle_deg=-correction_pitch * GEAR_RATIO_PITCH,
+                    vel_rpm=vel_rpm,
+                    acc=acc,
+                    abs_mode=False,
+                )
 
             elif status == Status.LOST:
                 pid_yaw.reset()
                 pid_pitch.reset()
 
-            # --- 5. 防卡顿打印 (每 10 帧打印一次，降低 I/O 阻塞) ---
-            if render_counter % 10 == 0:
+            # --- 5. 防卡顿打印 (每 100 帧打印一次，降低 I/O 阻塞) ---
+            if render_counter % 100 == 0:
                 status_map = {
                     Status.TRACK: "TRACKING",
                     Status.TMP_LOST: "PREDICTING",
                     Status.LOST: "LOST",
                 }
                 print(
-                    f"[{render_counter}] FPS: {fps:>5.1f} | {status_map[status]:<10} | "
+                    f"[{render_counter}] FPS: {fps:>5.1f} | disten = |{status_map[status]:<10} | "
                     f"Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
                 )
 
@@ -215,14 +221,16 @@ def main():
         camera.release()
 
         # [硬件屏蔽]
-        # try:
-        #     stepper_yaw.emm_v5_stop_now()
-        #     stepper_pitch.emm_v5_stop_now()
-        #     stepper_yaw.emm_v5_en_control(state=False)
-        #     stepper_pitch.emm_v5_en_control(state=False)
-        #     stepper_yaw.close()
-        #     stepper_pitch.close()
-        # except: pass
+        try:
+            #   stepper_yaw.emm_v5_stop_now()
+            stepper_pitch.emm_v5_stop_now()
+            #   stepper_yaw.emm_v5_en_control(state=False)
+            stepper_pitch.emm_v5_en_control(state=False)
+            #    stepper_yaw.close()
+            stepper_pitch.close()
+
+        except:  # noqa: E722
+            pass
         # lazer.cleanup()
         # heart_beat.cleanup()
 
