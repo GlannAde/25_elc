@@ -1,3 +1,4 @@
+import math
 import time
 
 import cv2
@@ -15,8 +16,8 @@ from models.tracker import Status, Tracker
 
 # ==================== 系统参数配置区 ====================
 CAMERA_INDEX = 0  # 摄像头索引 (如果在 Windows 测试，通常是 0 或 1)
-# YAW_PORT = "/dev/ttyACM1"
-PITCH_PORT = "/dev/ttyACM0"
+PORT = "/dev/ttyACM0"
+# PITCH_PORT = "/dev/ttyACM1"
 
 USE_KF = True  # 是否启用 3D 卡尔曼滤波预测
 SHOW_WINDOWS = True  # 是否显示调试画面和参数控制台 (设为 False 可榨干极限性能)
@@ -30,11 +31,19 @@ GEAR_RATIO_PITCH = 9.23
 # 初始化相机和视觉算法模块
 camera = Camera(index=CAMERA_INDEX, width=640, height=480, format="MJPG", fps=120)
 detector = Detector(min_area=5000, max_area=500000, use_adaptive=True)
-tracker = Tracker(real_width=21.0, real_height=17.5, use_kf=USE_KF)
+
+tracker = Tracker(
+    real_width=21.0,
+    real_height=17.5,
+    use_kf=True,
+    imu_port="/dev/ttyACM1",     # 你的 IMU 串口
+    imu_baud=921600,
+    imu_fusion_alpha=0.95
+)
 
 # [硬件屏蔽] 电机初始化
-# stepper_yaw = EmmMotor(port=YAW_PORT, baudrate=115200, timeout=1, motor_id=1)
-stepper_pitch = EmmMotor(port=PITCH_PORT, baudrate=115200, timeout=1, motor_id=2)
+stepper_yaw = EmmMotor(port=PORT, baudrate=115200, timeout=1, motor_id=1)
+stepper_pitch = EmmMotor(port=PORT, baudrate=115200, timeout=1, motor_id=2)
 
 # PID 初始化 (保留 PID 对象用于在终端观察输出运算结果)
 pid_yaw = PIDController(Kp=0.0, Ki=0.0, Kd=0.0, dt=1 / 120.0)
@@ -56,16 +65,16 @@ def init_board():
     cv2.resizeWindow("Controls", 400, 350)
     cv2.namedWindow("Tracker", cv2.WINDOW_FREERATIO)
 
-    cv2.createTrackbar("yaw_kp", "Controls", 20, 1000, nothing)
+    cv2.createTrackbar("yaw_kp", "Controls", 50, 1000, nothing)
     cv2.createTrackbar("yaw_ki", "Controls", 0, 1000, nothing)
     cv2.createTrackbar("yaw_kd", "Controls", 10, 1000, nothing)
 
-    cv2.createTrackbar("pitch_kp", "Controls", 20, 1000, nothing)
+    cv2.createTrackbar("pitch_kp", "Controls", 50, 1000, nothing)
     cv2.createTrackbar("pitch_ki", "Controls", 0, 1000, nothing)
     cv2.createTrackbar("pitch_kd", "Controls", 10, 1000, nothing)
 
-    cv2.createTrackbar("vel_rpm", "Controls", 500, 5000, nothing)
-    cv2.createTrackbar("acc", "Controls", 100, 255, nothing)
+    cv2.createTrackbar("vel_rpm", "Controls", 4000, 5000, nothing)
+    cv2.createTrackbar("acc", "Controls", 200, 255, nothing)
 
 
 def update_params():
@@ -95,9 +104,11 @@ def update_params():
 def main():
     print("\n 视觉正常启动\n   [按 'q' / 按 Ctrl+C 退出]")
 
+    LASER_CAM_BASELINE = 0.03  # 激光器到相机光心的水平距离（米）
+
     # [硬件屏蔽]
     try:
-        #    stepper_yaw.emm_v5_en_control(state=True)
+        stepper_yaw.emm_v5_en_control(state=True)
         stepper_pitch.emm_v5_en_control(state=True)
     except Exception as e:  # noqa: F841
         pass
@@ -130,6 +141,14 @@ def main():
                     target, mode=current_mode, real_radius_m=0.15, period_sec=3.0
                 )
             )
+            # --- 2.5 视差补偿（激光在相机左侧 -> 弹道偏右 -> 需要减小 yaw_err）---
+            if dist > 0 and status != Status.LOST:
+                # 补偿角度（弧度）= arctan(基线 / 距离)
+                comp_rad = math.atan2(LASER_CAM_BASELINE, dist)
+                comp_deg = math.degrees(comp_rad)  # 转换为度（如果 yaw_err 是度）
+                yaw_err -= comp_deg  # 向左补偿
+                # 如果你的 yaw_err 是像素单位，需要先转换为角度，或补偿也用像素
+                # 具体取决于 tracker 内部实现。通常 tracker.track() 返回的 yaw_err 已经是角度制。
 
             # --- 3. FPS 计算 ---
             curr_time = time.time()
@@ -142,18 +161,22 @@ def main():
 
             # --- 4. PID 控制解算 ---
             if status in (Status.TRACK, Status.TMP_LOST):
-                # correction_yaw = pid_yaw.compute(yaw_err)
+                correction_yaw = pid_yaw.compute(yaw_err)
                 correction_pitch = pid_pitch.compute(pitch_err)
 
                 # [硬件屏蔽] 发送给电机
-                # stepper_yaw.emm_v5_move_to_angle(angle_deg=-correction_yaw * GEAR_RATIO_YAW, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
+                stepper_yaw.emm_v5_move_to_angle(
+                    angle_deg=correction_yaw * GEAR_RATIO_YAW,
+                    vel_rpm=vel_rpm,
+                    acc=acc,
+                    abs_mode=False,
+                )
                 stepper_pitch.emm_v5_move_to_angle(
                     angle_deg=-correction_pitch * GEAR_RATIO_PITCH,
                     vel_rpm=vel_rpm,
                     acc=acc,
                     abs_mode=False,
                 )
-
             elif status == Status.LOST:
                 pid_yaw.reset()
                 pid_pitch.reset()
@@ -166,8 +189,8 @@ def main():
                     Status.LOST: "LOST",
                 }
                 print(
-                    f"[{render_counter}] FPS: {fps:>5.1f} | disten = |{status_map[status]:<10} | "
-                    f"Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
+                    f"[{render_counter}] FPS: {fps:>5.1f} |{status_map[status]:<10} | "
+                    f"disten = | Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
                 )
 
             # ================= 高帧率渲染解耦区 =================
@@ -222,11 +245,11 @@ def main():
 
         # [硬件屏蔽]
         try:
-            #   stepper_yaw.emm_v5_stop_now()
+            stepper_yaw.emm_v5_stop_now()
             stepper_pitch.emm_v5_stop_now()
-            #   stepper_yaw.emm_v5_en_control(state=False)
+            stepper_yaw.emm_v5_en_control(state=False)
             stepper_pitch.emm_v5_en_control(state=False)
-            #    stepper_yaw.close()
+            stepper_yaw.close()
             stepper_pitch.close()
 
         except:  # noqa: E722

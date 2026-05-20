@@ -1,12 +1,14 @@
-# tracker.py 完整重构
 import math
 import time
 from enum import IntEnum
-from models.Kalman import KalmanFilter3D
+from models.dm_serial import DM_Serial
+import threading
 
 import cv2
 import numpy as np
 import yaml
+
+from models.Kalman import KalmanFilter3D
 
 
 class Status(IntEnum):
@@ -16,7 +18,7 @@ class Status(IntEnum):
 
 
 class Tracker:
-    def __init__(self, real_width=21.0, real_height=17.5, use_kf=True):
+    def __init__(self, real_width=21.0, real_height=17.5, use_kf=True, imu_port=None, imu_baud=921600 ,imu_fusion_alpha=0.98):
         """
         :param real_width: 靶纸物理宽度 (单位: 厘米)
         :param real_height: 靶纸物理高度 (单位: 厘米)
@@ -26,11 +28,18 @@ class Tracker:
         self.real_height = real_height / 100.0
 
         # 相机坐标系轴向偏置补偿 (米)
-        self.ref_point = np.array([-0.0, 0.0, 0.0])
+        self.ref_point = np.array([-0.08, 0.0, 0.0])
         self.yaw_bias = -2.3
         self.pitch_bias = -0.2
 
         self.use_kf = use_kf
+
+        # --- 新增 IMU 融合参数 ---
+        self.imu_fusion_alpha = imu_fusion_alpha   # 互补滤波系数 (0~1)，越大越信任 IMU
+        self.imu_yaw = None                        # 最近一次 IMU 绝对 Yaw (度)
+        self.imu_yaw_valid = False                 # IMU 数据是否有效
+        self.last_imu_yaw_deg = 0.0                # 上一帧 IMU Yaw
+
         self.status = Status.LOST
         self.lost_count = 0
         self.frame_lost_tol = 8
@@ -38,6 +47,10 @@ class Tracker:
 
         self.onfire = False
         self.fire_deadzone = 1.5  # 允许开火的角度误差角度
+
+        self.imu_serial = None
+        if imu_port:
+            self._init_imu(imu_port, imu_baud)
 
         if self.use_kf:
             self.kf = KalmanFilter3D()
@@ -68,6 +81,48 @@ class Tracker:
                 dtype=np.float32,
             )
             self.dist_coeffs = np.zeros((5, 1), dtype=np.float32)
+
+    def _init_imu(self, port, baud):
+        """初始化 DM_Serial 并启动后台读线程"""
+        try:
+            self.imu_serial = DM_Serial(port, baud)
+            if not self.imu_serial.is_open:
+                print(f"[Tracker] IMU 打开失败: {self.imu_serial.last_error()}")
+                return
+            # 启动后台读取线程（不打印，只刷新最新帧）
+            self.imu_serial.start_reader(read_sleep=0.001)
+            # 稍等几帧，确保有数据
+            time.sleep(0.1)
+            # 获取一次初始 Yaw
+            pkt, ts, cnt = self.imu_serial.get_latest()
+            if pkt:
+                rid, (ax, ay, az) = pkt   # 注意: DM_Serial 返回 (rid, (f1,f2,f3))
+                # 这里假设达妙 IMU 数据格式为: [roll, pitch, yaw] 或 [acc_x, acc_y, acc_z]?
+                # 实际需要根据你 IMU 的 RID 解读。常见的 RID=0x01 可能是欧拉角。
+                # 默认第 3 个值为 Yaw
+                self.imu_yaw = f3    # 单位度  # noqa: F821
+                self.imu_yaw_valid = True
+            print(f"[Tracker] IMU 已启动，初始 Yaw = {self.imu_yaw:.2f}°")
+        except Exception as e:
+            print(f"[Tracker] IMU 初始化失败: {e}")
+            self.imu_serial = None
+
+    def _get_imu_yaw(self):
+        """从最新 IMU 帧中提取 Yaw 角（度），若无效返回 None"""
+        if not self.imu_serial:
+            return None
+        pkt, ts, cnt = self.imu_serial.get_latest()
+        if pkt:
+            rid, (v1, v2, v3) = pkt
+            # --- 重要：请根据你 IMU 的实际输出修改这里 ---
+            # 如果 RID=0x01 对应 [Roll, Pitch, Yaw]，则 yaw = v3
+            # 如果对应 [AccX, AccY, AccZ]，则需要额外积分得到 Yaw。
+            # 以下假设 v3 就是 Yaw（度）
+            yaw_deg = v3
+            self.imu_yaw = yaw_deg
+            self.imu_yaw_valid = True
+            return yaw_deg
+        return None
 
     def time_diff(self):
         # 计算时间间隔
@@ -167,69 +222,55 @@ class Tracker:
         return int(img_pts[0][0][0]), int(img_pts[0][0][1])
 
     def track(self, board, mode="TRACK", real_radius_m=0.15, period_sec=3.0):
-        """
-        :param real_radius_m: 物理画圆半径 (单位: 米， 0.15m = 15cm)
-        """
-        # 1. 滤波得到当前三维空间最优估计坐标
         fx, fy, fz = self.filter_and_predict(board)
 
         if self.status != Status.LOST:
-            # 从 3D 卡尔曼滤波器提取物理空间运动速度 (米/秒)
-            vx = self.kf.kf.statePost[3, 0] if self.use_kf else 0.0
-            vy = self.kf.kf.statePost[4, 0] if self.use_kf else 0.0
-            vz = self.kf.kf.statePost[5, 0] if self.use_kf else 0.0
-
-            sys_delay = 0.05  # 提前量时间补偿 (秒)
-
-            # 计算带有物理速度提前量的 3D 瞄准点
+            vx = self.kf.kf.statePost[3,0] if self.use_kf else 0.0
+            vy = self.kf.kf.statePost[4,0] if self.use_kf else 0.0
+            vz = self.kf.kf.statePost[5,0] if self.use_kf else 0.0
+            sys_delay = 0.05
             aim_x = fx + vx * sys_delay
             aim_y = fy + vy * sys_delay
             aim_z = fz + vz * sys_delay
 
-            # 2. 叠加三维闭环物理画圆
             if mode == "CIRCLE":
                 t = time.time()
                 omega = 2 * math.pi / period_sec
-                # 直接在三维空间坐标系上叠加圆周运算
                 aim_x += real_radius_m * math.cos(omega * t)
                 aim_y += real_radius_m * math.sin(omega * t)
 
-            # 3. 逆运动学解算（在三维物理坐标系下，公式变得极其纯粹直观！）
-            # OpenCV 轴向：X轴向右，Y轴向下，Z轴向前
-            # 计算 Yaw：物体横向偏移 / 前向深度
-            yaw_err = -math.degrees(
-                math.atan2(aim_x + self.ref_point[0], aim_z + self.ref_point[2])
-            )
-            # 计算 Pitch：物体纵向偏移 / 水平深度
+            # ----- 视觉计算原始 Yaw/Pitch -----
+            yaw_err_vision = -math.degrees(math.atan2(aim_x + self.ref_point[0], aim_z + self.ref_point[2]))
             horizontal_dist = math.hypot(aim_x, aim_z)
-            pitch_err = math.degrees(
-                math.atan2(aim_y + self.ref_point[1], max(horizontal_dist, 0.1))
-            )
+            pitch_err_vision = math.degrees(math.atan2(aim_y + self.ref_point[1], max(horizontal_dist, 0.1)))
 
+            # ----- 融合 IMU Yaw -----
+            imu_yaw = self._get_imu_yaw()
+            if imu_yaw is not None and self.imu_yaw_valid:
+                # 简单的互补滤波，对 yaw_err 做平滑（系数可调）
+                if not hasattr(self, '_filtered_yaw'):
+                    self._filtered_yaw = yaw_err_vision
+                self._filtered_yaw = self.imu_fusion_alpha * self._filtered_yaw + (1 - self.imu_fusion_alpha) * yaw_err_vision
+                yaw_err = self._filtered_yaw
+                # 可选：pitch 也可以融合 IMU pitch
+                # pitch_err = ...
+            else:
+                yaw_err = yaw_err_vision
+                self._filtered_yaw = yaw_err_vision
+
+            # 添加 bias 补偿（仍保留原有）
             yaw_err += self.yaw_bias
-            pitch_err += self.pitch_bias
+            pitch_err_vision += self.pitch_bias
+            # 注意：pitch 未融合 IMU，直接使用视觉结果
+            pitch_err = pitch_err_vision
 
-            # 开火控制决策
-            self.onfire = (
-                self.status == Status.TRACK
-                and abs(yaw_err) < self.fire_deadzone
-                and abs(pitch_err) < self.fire_deadzone
-            )
+            self.onfire = (self.status == Status.TRACK and abs(yaw_err) < self.fire_deadzone and abs(pitch_err) < self.fire_deadzone)
 
-            # 将 3D 预测出的点逆向投影到 2D 像素屏幕上，方便 OpenCV 窗口画线展示
+            # 投影 2D 点等...
             smooth_center_2d = self.project_3d_to_2d(fx, fy, fz)
             aim_point_2d = self.project_3d_to_2d(aim_x, aim_y, aim_z)
-            laser_pos_2d = self.project_3d_to_2d(0.0, 0.0, fz)  # 枪管基准轴中心投影
-
-            return (
-                yaw_err,
-                pitch_err,
-                fz,
-                self.status,
-                laser_pos_2d,
-                smooth_center_2d,
-                aim_point_2d,
-            )
+            laser_pos_2d = self.project_3d_to_2d(0.0, 0.0, fz)
+            return (yaw_err, pitch_err, fz, self.status, laser_pos_2d, smooth_center_2d, aim_point_2d)
         else:
             self.onfire = False
             return 0.0, 0.0, 0.0, self.status, None, None, None

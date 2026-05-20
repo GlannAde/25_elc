@@ -39,7 +39,7 @@ class EmmMotor:
     motor_id : 电机地址ID
     """
 
-    def __init__(self, port="COM13", baudrate=115200, timeout=1, motor_id=1):
+    def __init__(self, port="COM13", baudrate=115200, timeout=1, motor_id=1,sync = True):
         # 保留参数
         self.port = port
         self.baudrate = baudrate
@@ -56,6 +56,7 @@ class EmmMotor:
         self.send_thread = threading.Thread(target=self._send_loop, daemon=True)
         self.send_thread.start()
         # ================================================================
+        self.Sync = sync
 
     def _send_loop(self):
         """后台发送守护线程：不断从队列取指令发送，不阻塞主视觉线程"""
@@ -70,7 +71,7 @@ class EmmMotor:
             except serial.SerialException as e:
                 print(f"[错误] 串口 {self.port} 后台发送异常: {e}")
 
-    def _send_cmd(self, cmd_bytes, sync=False):
+    def _send_cmd(self, cmd_bytes, sync=True):
         """
         核心发送接口
         :param sync: True 代表同步阻塞发送 (用于读参数), False 代表异步放队列 (默认，用于高频控制)
