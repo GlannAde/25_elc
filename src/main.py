@@ -1,4 +1,3 @@
-"""主程序入口：负责系统初始化、主循环控制、模块协同以及资源清理。"""
 import time
 
 import cv2
@@ -30,7 +29,7 @@ GEAR_RATIO_PITCH = 9.23
 # 初始化相机和视觉算法模块
 camera = Camera(index=CAMERA_INDEX, width=640, height=480, format="MJPG", fps=120)
 detector = Detector(min_area=5000, max_area=500000, use_adaptive=True)
-tracker = Tracker(f_pixel_h=725.6, real_height=17.5, use_kf=USE_KF)
+tracker = Tracker(real_width=21.0, real_height=17.5, use_kf=USE_KF)
 
 # [硬件屏蔽] 电机初始化
 # stepper_yaw = EmmMotor(port=YAW_PORT, baudrate=115200, timeout=1, motor_id=1)
@@ -126,7 +125,9 @@ def main():
             # --- 2. 视觉解算 ---
             target = detector.detect(frame)
             yaw_err, pitch_err, dist, status, laser_pos, smooth_center, aim_point = (
-                tracker.track(target, mode=current_mode, radius_px=100, period_sec=3.0)
+                tracker.track(
+                    target, mode=current_mode, real_radius_m=0.15, period_sec=3.0
+                )
             )
 
             # --- 3. FPS 计算 ---
@@ -144,15 +145,15 @@ def main():
                 correction_pitch = pid_pitch.compute(pitch_err)
 
                 # [硬件屏蔽] 发送给电机
-                # stepper_yaw.emm_v5_move_to_angle(angle_deg=-correction_yaw * GEAR_RATIO_YAW, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
-                # stepper_pitch.emm_v5_move_to_angle(angle_deg=-correction_pitch * GEAR_RATIO_PITCH, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
+                stepper_yaw.emm_v5_move_to_angle(angle_deg=-correction_yaw * GEAR_RATIO_YAW, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
+                stepper_pitch.emm_v5_move_to_angle(angle_deg=-correction_pitch * GEAR_RATIO_PITCH, vel_rpm=vel_rpm, acc=acc, abs_mode=False)
 
             elif status == Status.LOST:
                 pid_yaw.reset()
                 pid_pitch.reset()
 
-            # --- 5. 防卡顿打印 (每 60 帧打印一次，降低 I/O 阻塞) ---
-            if render_counter % 60 == 0:
+            # --- 5. 防卡顿打印 (每 10 帧打印一次，降低 I/O 阻塞) ---
+            if render_counter % 100== 0:
                 status_map = {
                     Status.TRACK: "TRACKING",
                     Status.TMP_LOST: "PREDICTING",
@@ -160,7 +161,7 @@ def main():
                 }
                 print(
                     f"[{render_counter}] FPS: {fps:>5.1f} | {status_map[status]:<10} | "
-                    f"Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
+                    f"Dist: {dist:>5.2f}m | Yaw_Err: {yaw_err:>6.1f} | Pitch_Err: {pitch_err:>6.1f} | Mode: {current_mode}"
                 )
 
             # ================= 高帧率渲染解耦区 =================
